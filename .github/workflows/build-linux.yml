@@ -49,7 +49,8 @@ jobs:
             libgl1-mesa-dev \
             libglu1-mesa-dev
           if [[ "${{ inputs.use_qt6 }}" == "true" ]]; then
-            sudo apt-get install -y --no-install-recommends qt6-base-dev
+            # Qt6OpenGL's CMake config lives in libqt6opengl6-dev on Ubuntu 22.04
+            sudo apt-get install -y --no-install-recommends qt6-base-dev libqt6opengl6-dev
           else
             # Qt5OpenGL's CMake config lives in libqt5opengl5-dev on Ubuntu
             sudo apt-get install -y --no-install-recommends qtbase5-dev libqt5opengl5-dev
