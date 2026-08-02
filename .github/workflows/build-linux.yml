@@ -52,7 +52,8 @@ jobs:
           if [[ "${{ inputs.use_qt6 }}" == "true" ]]; then
             sudo apt-get install -y --no-install-recommends qt6-base-dev
           else
-            sudo apt-get install -y --no-install-recommends qtbase5-dev
+            # Qt5OpenGL's CMake config lives in libqt5opengl5-dev on Ubuntu
+            sudo apt-get install -y --no-install-recommends qtbase5-dev libqt5opengl5-dev
           fi
 
       - name: Cache VTK install
