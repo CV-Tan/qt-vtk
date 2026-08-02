@@ -1,6 +1,7 @@
 name: Build Linux
 
 on:
+  push:
   workflow_dispatch:
     inputs:
       configuration:
