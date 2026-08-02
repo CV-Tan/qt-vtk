@@ -1,0 +1,21 @@
+# build directories
+build-*/
+out/
+
+# CMake / Visual Studio artifacts (in case of in-source builds)
+CMakeCache.txt
+cmake_install.cmake
+CMakeFiles/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.suo
+*.user
+.vs/
+
+# diagnostic artifacts
+diag.txt
+vtk_errors.txt
+shot.png
+vtk_render.png
+offscreen.png

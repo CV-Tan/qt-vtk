@@ -1,0 +1,159 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+      use_qt6:
+        description: 'Build with Qt6 instead of Qt5'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  VTK_VERSION: v9.6.2
+  VTK_SOURCE_DIR: ${{ github.workspace }}\vtk-source
+  VTK_BUILD_DIR: ${{ github.workspace }}\vtk-build
+  VTK_INSTALL_DIR: ${{ github.workspace }}\vtk-install
+  QT_INSTALL_DIR: D:\Qt
+  # Qt 5.15.2 是 5.15 最后一个开源二进制（后续 5.15.x Windows 仅商业版）。
+  # Qt 6 使用与 windows-2022 自带 MSVC 2022 匹配的 msvc2022 构建。
+  QT_VERSION_5: 5.15.2
+  QT_VERSION_6: 6.7.3
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        run: pip install ninja
+
+      - name: Install Qt (aqtinstall)
+        shell: powershell
+        run: |
+          pip install aqtinstall
+          if ("${{ inputs.use_qt6 }}" -eq "true") {
+            aqt install-qt windows desktop ${{ env.QT_VERSION_6 }} win64_msvc2022_64 -O ${{ env.QT_INSTALL_DIR }}
+            "QT_ROOT=${{ env.QT_INSTALL_DIR }}\${{ env.QT_VERSION_6 }}\win64_msvc2022_64" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+            aqt install-qt windows desktop ${{ env.QT_VERSION_5 }} win64_msvc2019_64 -O ${{ env.QT_INSTALL_DIR }}
+            "QT_ROOT=${{ env.QT_INSTALL_DIR }}\${{ env.QT_VERSION_5 }}\win64_msvc2019_64" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+
+      - name: Cache VTK install
+        id: cache-vtk
+        uses: actions/cache@v4
+        with:
+          path: vtk-install
+          key: vtk-${{ env.VTK_VERSION }}-${{ inputs.configuration }}-windows-${{ hashFiles('.github/workflows/build-windows.yml') }}
+
+      - name: Clone VTK
+        if: steps.cache-vtk.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive --branch ${{ env.VTK_VERSION }} --depth 1 `
+            https://gitlab.kitware.com/vtk/vtk.git ${{ env.VTK_SOURCE_DIR }}
+
+      # 静态 VTK，仅包含 QtVtkOpenGLWidget 需要的渲染模块。
+      # Qt 不参与 VTK 构建（VTK_GROUP_ENABLE_Qt=NO），这正是本示例「一份 VTK 同时支持
+      # Qt5 / Qt6」的前提。
+      - name: Configure VTK (QtVtkOpenGLWidget modules)
+        if: steps.cache-vtk.outputs.cache-hit != 'true'
+        run: |
+          cmake -S ${{ env.VTK_SOURCE_DIR }} -B ${{ env.VTK_BUILD_DIR }} `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=${{ inputs.configuration }} `
+            -DCMAKE_INSTALL_PREFIX=${{ env.VTK_INSTALL_DIR }} `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DVTK_BUILD_TESTING=OFF `
+            -DVTK_BUILD_EXAMPLES=OFF `
+            -DVTK_BUILD_DOCUMENTATION=OFF `
+            -DVTK_BUILD_SCALED_SOA_ARRAYS=OFF `
+            -DVTK_ENABLE_LOGGING=OFF `
+            -DVTK_ENABLE_WRAPPING=OFF `
+            -DVTK_LEGACY_REMOVE=ON `
+            -DVTK_VERSIONED_INSTALL=OFF `
+            -DVTK_SMP_ENABLE_TBB=OFF `
+            -DVTK_SMP_ENABLE_SEQUENTIAL=OFF `
+            -DVTK_SMP_ENABLE_STDTHREAD=ON `
+            -DVTK_SMP_IMPLEMENTATION_TYPE=StdThread `
+            -DVTK_GROUP_ENABLE_Rendering=DEFAULT `
+            -DVTK_GROUP_ENABLE_StandAlone=DEFAULT `
+            -DVTK_GROUP_ENABLE_Qt=NO `
+            -DVTK_GROUP_ENABLE_Views=NO `
+            -DVTK_GROUP_ENABLE_Web=NO `
+            -DVTK_GROUP_ENABLE_MPI=NO `
+            -DVTK_MODULE_ENABLE_VTK_CommonColor=YES `
+            -DVTK_MODULE_ENABLE_VTK_CommonComputationalGeometry=YES `
+            -DVTK_MODULE_ENABLE_VTK_FiltersModeling=YES `
+            -DVTK_MODULE_ENABLE_VTK_FiltersSources=YES `
+            -DVTK_MODULE_ENABLE_VTK_IOImage=YES `
+            -DVTK_MODULE_ENABLE_VTK_ImagingMath=YES `
+            -DVTK_MODULE_ENABLE_VTK_InteractionStyle=YES `
+            -DVTK_MODULE_ENABLE_VTK_InteractionWidgets=YES `
+            -DVTK_MODULE_ENABLE_VTK_RenderingAnnotation=YES `
+            -DVTK_MODULE_ENABLE_VTK_RenderingLabel=YES `
+            -DVTK_MODULE_ENABLE_VTK_RenderingOpenGL2=YES `
+            -DVTK_MODULE_ENABLE_VTK_RenderingUI=YES
+
+      - name: Build and install VTK
+        if: steps.cache-vtk.outputs.cache-hit != 'true'
+        run: |
+          cmake --build ${{ env.VTK_BUILD_DIR }} --target install --parallel
+
+      - name: Configure QtVtkOpenGLWidget example
+        run: |
+          $qt6Option = @()
+          if ("${{ inputs.use_qt6 }}" -eq "true") { $qt6Option = @("-DUSE_QT6=ON") }
+          cmake -S . -B build `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=${{ inputs.configuration }} `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT" `
+            -DVTK_DIR=${{ env.VTK_INSTALL_DIR }}\lib\cmake\vtk `
+            @qt6Option
+
+      - name: Build example
+        run: |
+          cmake --build build --parallel
+
+      - name: Bundle Qt runtime
+        shell: powershell
+        run: |
+          $exe = "build\qvtk_demo.exe"
+          if (-not (Test-Path $exe)) { throw "Built example exe was not found: $exe" }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item -LiteralPath $exe -Destination artifacts\qvtk_demo.exe
+          & "$env:QT_ROOT\bin\windeployqt.exe" --release artifacts\qvtk_demo.exe
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit code $LASTEXITCODE" }
+
+      - name: Verify published native dependencies
+        shell: powershell
+        run: |
+          $exe = "artifacts\qvtk_demo.exe"
+          if (-not (Test-Path $exe)) { throw "Published exe was not found." }
+          $dependencies = dumpbin /dependents $exe | Out-String
+          $dependencies
+          if ($dependencies -match '(?im)^\s*vtk[^\s]*\.dll\s*$') {
+            throw "The published exe still depends on a VTK DLL (expected a static VTK build)."
+          }
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: QtVtkOpenGLWidget-Windows-${{ inputs.configuration }}-qt${{ inputs.use_qt6 && '6' || '5' }}
+          path: artifacts/

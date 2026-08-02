@@ -1,0 +1,198 @@
+name: Build Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+      use_qt6:
+        description: 'Build with Qt6 instead of Qt5'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  VTK_VERSION: v9.6.2
+  VTK_SOURCE_DIR: ${{ github.workspace }}/vtk-source
+  VTK_BUILD_DIR: ${{ github.workspace }}/vtk-build
+  VTK_INSTALL_DIR: ${{ github.workspace }}/vtk-install
+
+jobs:
+  build:
+    # 固定 ubuntu-22.04：构建机 glibc 为 2.35，产物可向下兼容运行在 Ubuntu 22.04
+    # 及更高版本（若目标是更老的系统，需改用更低的构建基线）。
+    # apt 同时提供 Qt 5.15.3（qtbase5-dev）与 Qt 6.2.4（qt6-base-dev）。
+    # 注意：GitHub 未来可能退役 ubuntu-22.04 镜像（Ubuntu 官方支持到 2027-04），
+    # 届时需改用容器内 ubuntu:22.04 构建的方式。
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build \
+            libx11-dev \
+            libxcursor-dev \
+            libxext-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev
+          if [[ "${{ inputs.use_qt6 }}" == "true" ]]; then
+            sudo apt-get install -y --no-install-recommends qt6-base-dev
+          else
+            sudo apt-get install -y --no-install-recommends qtbase5-dev
+          fi
+
+      - name: Cache VTK install
+        id: cache-vtk
+        uses: actions/cache@v4
+        with:
+          path: vtk-install
+          key: vtk-${{ env.VTK_VERSION }}-${{ inputs.configuration }}-linux-${{ hashFiles('.github/workflows/build-linux.yml') }}
+
+      - name: Clone VTK
+        if: steps.cache-vtk.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive --branch ${{ env.VTK_VERSION }} --depth 1 \
+            https://gitlab.kitware.com/vtk/vtk.git ${{ env.VTK_SOURCE_DIR }}
+
+      # 静态 VTK，仅包含 QtVtkOpenGLWidget 需要的渲染模块。
+      # Qt 不参与 VTK 构建（VTK_GROUP_ENABLE_Qt=NO），这正是本示例「一份 VTK 同时支持
+      # Qt5 / Qt6」的前提。
+      - name: Configure VTK (QtVtkOpenGLWidget modules)
+        if: steps.cache-vtk.outputs.cache-hit != 'true'
+        run: |
+          cmake -S "${{ env.VTK_SOURCE_DIR }}" -B "${{ env.VTK_BUILD_DIR }}" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ inputs.configuration }} \
+            -DCMAKE_INSTALL_PREFIX=${{ env.VTK_INSTALL_DIR }} \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DVTK_BUILD_TESTING=OFF \
+            -DVTK_BUILD_EXAMPLES=OFF \
+            -DVTK_BUILD_DOCUMENTATION=OFF \
+            -DVTK_BUILD_SCALED_SOA_ARRAYS=OFF \
+            -DVTK_ENABLE_LOGGING=OFF \
+            -DVTK_ENABLE_WRAPPING=OFF \
+            -DVTK_LEGACY_REMOVE=ON \
+            -DVTK_USE_X=ON \
+            -DVTK_VERSIONED_INSTALL=OFF \
+            -DVTK_SMP_ENABLE_TBB=OFF \
+            -DVTK_SMP_ENABLE_SEQUENTIAL=OFF \
+            -DVTK_SMP_ENABLE_STDTHREAD=ON \
+            -DVTK_SMP_IMPLEMENTATION_TYPE=StdThread \
+            -DVTK_GROUP_ENABLE_Rendering=DEFAULT \
+            -DVTK_GROUP_ENABLE_StandAlone=DEFAULT \
+            -DVTK_GROUP_ENABLE_Qt=NO \
+            -DVTK_GROUP_ENABLE_Views=NO \
+            -DVTK_GROUP_ENABLE_Web=NO \
+            -DVTK_GROUP_ENABLE_MPI=NO \
+            -DVTK_MODULE_ENABLE_VTK_CommonColor=YES \
+            -DVTK_MODULE_ENABLE_VTK_CommonComputationalGeometry=YES \
+            -DVTK_MODULE_ENABLE_VTK_FiltersModeling=YES \
+            -DVTK_MODULE_ENABLE_VTK_FiltersSources=YES \
+            -DVTK_MODULE_ENABLE_VTK_IOImage=YES \
+            -DVTK_MODULE_ENABLE_VTK_ImagingMath=YES \
+            -DVTK_MODULE_ENABLE_VTK_InteractionStyle=YES \
+            -DVTK_MODULE_ENABLE_VTK_InteractionWidgets=YES \
+            -DVTK_MODULE_ENABLE_VTK_RenderingAnnotation=YES \
+            -DVTK_MODULE_ENABLE_VTK_RenderingLabel=YES \
+            -DVTK_MODULE_ENABLE_VTK_RenderingOpenGL2=YES \
+            -DVTK_MODULE_ENABLE_VTK_RenderingUI=YES
+
+      - name: Build and install VTK
+        if: steps.cache-vtk.outputs.cache-hit != 'true'
+        run: |
+          cmake --build "${{ env.VTK_BUILD_DIR }}" --target install --parallel
+
+      - name: Configure QtVtkOpenGLWidget example
+        run: |
+          qt6_option=""
+          if [[ "${{ inputs.use_qt6 }}" == "true" ]]; then
+            qt6_option="-DUSE_QT6=ON"
+          fi
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ inputs.configuration }} \
+            -DVTK_DIR=${{ env.VTK_INSTALL_DIR }}/lib/cmake/vtk \
+            ${qt6_option:+$qt6_option}
+
+      - name: Build example
+        run: cmake --build build --parallel
+
+      - name: Verify published binary
+        run: |
+          binary=build/qvtk_demo
+          test -x "$binary"
+          dynamic_section="$(readelf -d "$binary")"
+          echo "$dynamic_section"
+          if grep -q 'Shared library: \[libvtk' <<< "$dynamic_section"; then
+            echo "The example still depends on shared VTK libraries."
+            exit 1
+          fi
+          ldd_output="$(ldd "$binary")"
+          echo "$ldd_output"
+          if [[ "$ldd_output" == *"not found"* ]]; then
+            echo "One or more native dependencies are missing from the runner."
+            exit 1
+          fi
+
+          # 校验 glibc 基线：构建机是 ubuntu-22.04（glibc 2.35），
+          # 产物引用的 GLIBC 符号不得超过 2.35，否则无法在 22.04 上运行。
+          max_glibc="$(readelf --version-info "$binary" \
+            | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' | sort -Vu | tail -n 1 || true)"
+          if [[ -n "$max_glibc" ]] && \
+             [[ "$(printf '%s\n' GLIBC_2.35 "$max_glibc" | sort -V | tail -n 1)" != "GLIBC_2.35" ]]; then
+            echo "$binary requires $max_glibc, newer than the Ubuntu 22.04 baseline."
+            exit 1
+          fi
+
+      # 冒烟测试：Xvfb + Mesa 软件渲染（llvmpipe）下运行 15 秒不崩溃即通过。
+      # GUI/GL 在 CI 中偶尔不稳定，因此标记为 best-effort，失败不阻塞发布。
+      - name: Smoke test (Xvfb software GL)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            xvfb \
+            libxkbcommon0 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-shape0 \
+            libxcb-xfixes0 \
+            libxcb-xinerama0 \
+            libxcb-xkb1 \
+            libgl1-mesa-dri \
+            libglx-mesa0
+          set +e
+          xvfb-run -a timeout 15 ./build/qvtk_demo
+          status=$?
+          set -e
+          if [[ "$status" -eq 124 ]]; then
+            echo "Smoke test passed: the example ran under Xvfb for the full 15s."
+            exit 0
+          fi
+          echo "Smoke test failed: the example exited early (code $status)."
+          exit 1
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: QtVtkOpenGLWidget-Linux-${{ inputs.configuration }}-qt${{ inputs.use_qt6 && '6' || '5' }}
+          path: build/qvtk_demo
