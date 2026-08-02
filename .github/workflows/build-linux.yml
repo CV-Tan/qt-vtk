@@ -193,8 +193,77 @@ jobs:
           echo "Smoke test failed: the example exited early (code $status)."
           exit 1
 
+      # 用 linuxdeploy + Qt 插件把 Qt 运行时、平台插件一起打进单文件 AppImage，
+      # 目标机无需预装 Qt 即可运行（仍依赖系统的 libGL / libX11 等基础库）。
+      - name: Package AppImage (linuxdeploy)
+        run: |
+          set -eux
+          sudo apt-get install -y --no-install-recommends patchelf file
+          if [[ "${{ inputs.use_qt6 }}" == "true" ]]; then
+            sudo apt-get install -y --no-install-recommends qt6-base-dev-tools
+            qmake_bin=qmake6
+          else
+            sudo apt-get install -y --no-install-recommends qt5-qmake
+            qmake_bin=qmake
+          fi
+          mkdir -p tools qmake-dir
+          cd tools
+          curl -fsSL -o linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fsSL -o linuxdeploy-plugin-qt-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          curl -fsSL -o linuxdeploy-plugin-appimage-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+          curl -fsSL -o appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x ./*.AppImage
+          cd ..
+          # 让插件/子进程以解压方式运行 AppImage，避免 CI 上无 FUSE 的问题
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          # 统一暴露为 qmake，供 linuxdeploy-plugin-qt 探测 Qt 安装路径
+          ln -sf "$(command -v $qmake_bin)" qmake-dir/qmake
+          export PATH="$PWD/qmake-dir:$PWD/tools:$PATH"
+          export APPIMAGETOOL="$PWD/tools/appimagetool-x86_64.AppImage"
+          mkdir -p AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          # 用 printf 生成 desktop 文件与图标脚本，避免 heredoc 内容行在 YAML 块标量里
+          # 必须顶格导致的解析问题
+          printf '%s\n' \
+            '[Desktop Entry]' \
+            'Type=Application' \
+            'Name=QtVtkOpenGLWidget Example' \
+            'Comment=Minimal Qt + static VTK example' \
+            'Exec=qvtk_demo' \
+            'Icon=qt-vtk-opengl-widget-example' \
+            'Categories=Graphics;' \
+            'Terminal=false' \
+            > AppDir/usr/share/applications/qt-vtk-opengl-widget-example.desktop
+          printf '%s\n' \
+            'import struct, zlib' \
+            'def chunk(t, d):' \
+            '    c = t + d' \
+            "    return struct.pack('>I', len(d)) + c + struct.pack('>I', zlib.crc32(c) & 0xFFFFFFFF)" \
+            'w = h = 256' \
+            "raw = b''.join(b'\x00' + bytes([60, 110, 200]) * w for _ in range(h))" \
+            "ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)" \
+            "png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')" \
+            "open('AppDir/usr/share/icons/hicolor/256x256/apps/qt-vtk-opengl-widget-example.png', 'wb').write(png)" \
+            > gen_icon.py
+          python3 gen_icon.py
+          linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
+            --appdir AppDir \
+            --executable build/qvtk_demo \
+            --desktop-file AppDir/usr/share/applications/qt-vtk-opengl-widget-example.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/qt-vtk-opengl-widget-example.png \
+            --plugin qt \
+            --output appimage
+          appimage="$(ls -t ./*.AppImage 2>/dev/null | head -n1)"
+          test -n "$appimage"
+          mv -v "$appimage" build/QtVtkOpenGLWidget-Example-x86_64.AppImage
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: QtVtkOpenGLWidget-Linux-${{ inputs.configuration }}-qt${{ inputs.use_qt6 && '6' || '5' }}
-          path: build/qvtk_demo
+          path: |
+            build/qvtk_demo
+            build/QtVtkOpenGLWidget-Example-x86_64.AppImage
